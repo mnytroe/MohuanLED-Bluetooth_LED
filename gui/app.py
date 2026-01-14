@@ -14,11 +14,15 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
     QLabel,
     QMenu,
     QMessageBox,
     QPushButton,
     QSlider,
+    QSpinBox,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
@@ -43,6 +47,143 @@ LED_UUID = os.getenv("LED_UUID")
 
 # Get the project root directory for resource loading
 PROJECT_ROOT = Path(__file__).parent.parent
+
+# Dark mode stylesheet
+DARK_STYLE = """
+QWidget {
+    background-color: #1e1e1e;
+    color: #ffffff;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    font-size: 10pt;
+}
+
+QGroupBox {
+    border: 1px solid #3d3d3d;
+    border-radius: 6px;
+    margin-top: 12px;
+    padding-top: 10px;
+    font-weight: bold;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 5px;
+    color: #888888;
+}
+
+QPushButton {
+    background-color: #2d2d2d;
+    border: 1px solid #3d3d3d;
+    border-radius: 4px;
+    padding: 8px 16px;
+    min-height: 20px;
+}
+
+QPushButton:hover {
+    background-color: #3d3d3d;
+    border-color: #4d4d4d;
+}
+
+QPushButton:pressed {
+    background-color: #1d1d1d;
+}
+
+QPushButton#onButton {
+    background-color: #1a472a;
+    border-color: #2d5a3d;
+}
+
+QPushButton#onButton:hover {
+    background-color: #2d5a3d;
+}
+
+QPushButton#offButton {
+    background-color: #4a1a1a;
+    border-color: #5a2d2d;
+}
+
+QPushButton#offButton:hover {
+    background-color: #5a2d2d;
+}
+
+QPushButton#strobeButton {
+    background-color: #4a3a1a;
+    border-color: #5a4a2d;
+}
+
+QPushButton#strobeButton:hover {
+    background-color: #5a4a2d;
+}
+
+QSlider::groove:horizontal {
+    border: 1px solid #3d3d3d;
+    height: 8px;
+    border-radius: 4px;
+    background: #2d2d2d;
+}
+
+QSlider::handle:horizontal {
+    background: #888888;
+    border: 1px solid #666666;
+    width: 16px;
+    margin: -4px 0;
+    border-radius: 8px;
+}
+
+QSlider::handle:horizontal:hover {
+    background: #aaaaaa;
+}
+
+QSlider#redSlider::groove:horizontal {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #2d1a1a, stop:1 #8b0000);
+}
+
+QSlider#greenSlider::groove:horizontal {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #1a2d1a, stop:1 #006400);
+}
+
+QSlider#blueSlider::groove:horizontal {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #1a1a2d, stop:1 #00008b);
+}
+
+QSpinBox {
+    background-color: #2d2d2d;
+    border: 1px solid #3d3d3d;
+    border-radius: 4px;
+    padding: 2px 5px;
+    min-width: 50px;
+}
+
+QSpinBox::up-button, QSpinBox::down-button {
+    background-color: #3d3d3d;
+    border: none;
+    width: 16px;
+}
+
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+    background-color: #4d4d4d;
+}
+
+QFrame#colorPreview {
+    border: 2px solid #3d3d3d;
+    border-radius: 4px;
+    min-height: 40px;
+}
+
+QLabel {
+    color: #cccccc;
+}
+
+QLabel#titleLabel {
+    font-size: 14pt;
+    font-weight: bold;
+    color: #ffffff;
+}
+"""
 
 
 class LEDController(QWidget):
@@ -79,58 +220,128 @@ class LEDController(QWidget):
     def init_ui(self) -> None:
         """Initialize the user interface components."""
         self.setWindowTitle("LED Controller")
-        layout = QVBoxLayout()
+        self.setMinimumWidth(320)
+        self.setStyleSheet(DARK_STYLE)
 
-        # Reconnect button
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+
+        # Connection group
+        connection_group = QGroupBox("Connection")
+        connection_layout = QVBoxLayout()
         self.reconnect_button = QPushButton("Reconnect")
         self.reconnect_button.clicked.connect(self.on_reconnect_clicked)
-        layout.addWidget(self.reconnect_button)
+        connection_layout.addWidget(self.reconnect_button)
+        connection_group.setLayout(connection_layout)
+        main_layout.addWidget(connection_group)
 
-        # Power on button
+        # Power group
+        power_group = QGroupBox("Power")
+        power_layout = QHBoxLayout()
         self.on_button = QPushButton("Turn ON")
+        self.on_button.setObjectName("onButton")
         self.on_button.clicked.connect(self.on_turn_on_clicked)
-        layout.addWidget(self.on_button)
-
-        # Power off button
         self.off_button = QPushButton("Turn OFF")
+        self.off_button.setObjectName("offButton")
         self.off_button.clicked.connect(self.on_turn_off_clicked)
-        layout.addWidget(self.off_button)
+        power_layout.addWidget(self.on_button)
+        power_layout.addWidget(self.off_button)
+        power_group.setLayout(power_layout)
+        main_layout.addWidget(power_group)
 
-        # Red color slider
+        # Color group
+        color_group = QGroupBox("Color")
+        color_layout = QVBoxLayout()
+
+        # Red slider row
+        red_row = QHBoxLayout()
+        red_label = QLabel("R")
+        red_label.setFixedWidth(20)
         self.red_slider = QSlider(Qt.Orientation.Horizontal)
+        self.red_slider.setObjectName("redSlider")
         self.red_slider.setMaximum(255)
         self.red_slider.setValue(0)
+        self.red_spinbox = QSpinBox()
+        self.red_spinbox.setMaximum(255)
+        self.red_spinbox.setValue(0)
+        self.red_slider.valueChanged.connect(self.red_spinbox.setValue)
         self.red_slider.valueChanged.connect(self.update_color)
-        layout.addWidget(QLabel("Red"))
-        layout.addWidget(self.red_slider)
+        self.red_spinbox.valueChanged.connect(self.red_slider.setValue)
+        red_row.addWidget(red_label)
+        red_row.addWidget(self.red_slider)
+        red_row.addWidget(self.red_spinbox)
+        color_layout.addLayout(red_row)
 
-        # Green color slider
+        # Green slider row
+        green_row = QHBoxLayout()
+        green_label = QLabel("G")
+        green_label.setFixedWidth(20)
         self.green_slider = QSlider(Qt.Orientation.Horizontal)
+        self.green_slider.setObjectName("greenSlider")
         self.green_slider.setMaximum(255)
         self.green_slider.setValue(0)
+        self.green_spinbox = QSpinBox()
+        self.green_spinbox.setMaximum(255)
+        self.green_spinbox.setValue(0)
+        self.green_slider.valueChanged.connect(self.green_spinbox.setValue)
         self.green_slider.valueChanged.connect(self.update_color)
-        layout.addWidget(QLabel("Green"))
-        layout.addWidget(self.green_slider)
+        self.green_spinbox.valueChanged.connect(self.green_slider.setValue)
+        green_row.addWidget(green_label)
+        green_row.addWidget(self.green_slider)
+        green_row.addWidget(self.green_spinbox)
+        color_layout.addLayout(green_row)
 
-        # Blue color slider
+        # Blue slider row
+        blue_row = QHBoxLayout()
+        blue_label = QLabel("B")
+        blue_label.setFixedWidth(20)
         self.blue_slider = QSlider(Qt.Orientation.Horizontal)
+        self.blue_slider.setObjectName("blueSlider")
         self.blue_slider.setMaximum(255)
         self.blue_slider.setValue(0)
+        self.blue_spinbox = QSpinBox()
+        self.blue_spinbox.setMaximum(255)
+        self.blue_spinbox.setValue(0)
+        self.blue_slider.valueChanged.connect(self.blue_spinbox.setValue)
         self.blue_slider.valueChanged.connect(self.update_color)
-        layout.addWidget(QLabel("Blue"))
-        layout.addWidget(self.blue_slider)
+        self.blue_spinbox.valueChanged.connect(self.blue_slider.setValue)
+        blue_row.addWidget(blue_label)
+        blue_row.addWidget(self.blue_slider)
+        blue_row.addWidget(self.blue_spinbox)
+        color_layout.addLayout(blue_row)
 
-        # Rainbow cycle button
-        self.rainbow_button = QPushButton("Rainbow Cycle")
+        # Color preview
+        preview_row = QHBoxLayout()
+        preview_label = QLabel("Preview")
+        self.color_preview = QFrame()
+        self.color_preview.setObjectName("colorPreview")
+        self.color_preview.setStyleSheet("background-color: #000000;")
+        preview_row.addWidget(preview_label)
+        preview_row.addWidget(self.color_preview, 1)
+        color_layout.addLayout(preview_row)
+
+        color_group.setLayout(color_layout)
+        main_layout.addWidget(color_group)
+
+        # Effects group
+        effects_group = QGroupBox("Effects")
+        effects_layout = QHBoxLayout()
+        self.rainbow_button = QPushButton("Rainbow")
         self.rainbow_button.clicked.connect(self.on_rainbow_clicked)
-        layout.addWidget(self.rainbow_button)
-
-        # Fade colors button
-        self.fade_button = QPushButton("Fade Colors")
+        self.fade_button = QPushButton("Fade")
         self.fade_button.clicked.connect(self.on_fade_clicked)
-        layout.addWidget(self.fade_button)
+        self.strobe_button = QPushButton("Strobe")
+        self.strobe_button.setObjectName("strobeButton")
+        self.strobe_button.clicked.connect(self.on_strobe_clicked)
+        effects_layout.addWidget(self.rainbow_button)
+        effects_layout.addWidget(self.fade_button)
+        effects_layout.addWidget(self.strobe_button)
+        effects_group.setLayout(effects_layout)
+        main_layout.addWidget(effects_group)
 
-        self.setLayout(layout)
+        main_layout.addStretch()
+        self.setLayout(main_layout)
 
     def init_tray_icon(self) -> None:
         """Initialize the system tray icon and menu."""
@@ -319,9 +530,18 @@ class LEDController(QWidget):
 
     def update_color(self) -> None:
         """Update LED color when sliders change (debounced)."""
-        # Restart the debounce timer - actual update happens after timer fires
+        # Update color preview immediately
+        self._update_color_preview()
+        # Restart the debounce timer - actual LED update happens after timer fires
         if self._color_update_timer:
             self._color_update_timer.start(self.COLOR_UPDATE_DEBOUNCE_MS)
+
+    def _update_color_preview(self) -> None:
+        """Update the color preview box to show current slider values."""
+        red = self.red_slider.value()
+        green = self.green_slider.value()
+        blue = self.blue_slider.value()
+        self.color_preview.setStyleSheet(f"background-color: rgb({red}, {green}, {blue});")
 
     def _execute_color_update(self) -> None:
         """Execute the actual color update after debounce delay."""
@@ -447,6 +667,40 @@ class LEDController(QWidget):
         )
         end_color = (255, 0, 0)
         await self.led_instance.fade_to_color(start_color, end_color, 5.0)
+
+    @asyncSlot()
+    async def on_strobe_clicked(self) -> None:
+        """Handle strobe button click."""
+        try:
+            if not self.led_instance.is_connected:
+                await self.led_instance.connect()
+
+            # Use current slider color, or white if all zeros
+            red = self.red_slider.value()
+            green = self.green_slider.value()
+            blue = self.blue_slider.value()
+            if red == 0 and green == 0 and blue == 0:
+                red, green, blue = 255, 255, 255
+
+            await self.led_instance.strobe_light(
+                color=(red, green, blue),
+                duration=2.0,
+                flashes=10,
+            )
+        except LEDOperationCancelledError:
+            LOGGER.error("Strobe failed: Operation cancelled")
+            QMessageBox.warning(
+                self,
+                "Strobe Error",
+                "Failed to start strobe: Operation was cancelled.\n\n"
+                "Make sure:\n"
+                "• No other apps are connected to the LED\n"
+                "• The LED device is powered on\n"
+                "• Try using 'Reconnect' button first",
+            )
+        except BlueLightsError as e:
+            LOGGER.error(f"Strobe error: {e}")
+            QMessageBox.warning(self, "Strobe Error", f"Failed to start strobe: {e}")
 
 
 def main() -> None:
