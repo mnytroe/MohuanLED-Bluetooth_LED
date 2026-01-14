@@ -508,29 +508,36 @@ class BJLEDInstance:
 
         LOGGER.info("Completed rainbow cycle.")
 
-    async def breathing_light(self, color: tuple[int, int, int], duration: float) -> None:
+    async def breathing_light(
+        self, color: tuple[int, int, int], duration: float, cycles: int = 3
+    ) -> None:
         """
         Create a breathing light effect with pulsing brightness.
 
         Args:
             color: RGB color tuple for the breathing effect.
             duration: Total duration of one breath cycle in seconds.
+            cycles: Number of breath cycles to perform.
         """
         delay = duration / (BREATHING_STEPS * 2)
 
         r, g, b = color
-        # Fade in
-        for step in range(BREATHING_STEPS):
-            brightness = int((step / BREATHING_STEPS) * 255)
-            await self.set_color_to_rgb(r, g, b, brightness)
-            await asyncio.sleep(delay)
+        for _ in range(cycles):
+            # Fade in
+            for step in range(BREATHING_STEPS):
+                brightness = int((step / BREATHING_STEPS) * 255)
+                await self.set_color_to_rgb(r, g, b, brightness)
+                await asyncio.sleep(delay)
 
-        # Fade out
-        for step in range(BREATHING_STEPS, 0, -1):
-            brightness = int((step / BREATHING_STEPS) * 255)
-            await self.set_color_to_rgb(r, g, b, brightness)
-            await asyncio.sleep(delay)
+            # Fade out
+            for step in range(BREATHING_STEPS, 0, -1):
+                brightness = int((step / BREATHING_STEPS) * 255)
+                await self.set_color_to_rgb(r, g, b, brightness)
+                await asyncio.sleep(delay)
 
+        # Restore full brightness
+        self._brightness = 255
+        await self.set_color_to_rgb(r, g, b)
         LOGGER.info(f"Completed breathing effect with color {color}")
 
     async def strobe_light(

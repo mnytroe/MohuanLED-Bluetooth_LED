@@ -214,6 +214,9 @@ class LEDController(QWidget):
         self._color_update_task: asyncio.Task[None] | None = None
         self._color_update_timer: QTimer | None = None
         self._operation_in_progress: bool = False
+        self._jump_task: asyncio.Task | None = None
+        self._flash_task: asyncio.Task | None = None
+        self._rainbow_flash_task: asyncio.Task | None = None
         self.init_ui()
         self.init_tray_icon()
         self._setup_color_debounce()
@@ -327,18 +330,32 @@ class LEDController(QWidget):
 
         # Effects group
         effects_group = QGroupBox("Effects")
-        effects_layout = QHBoxLayout()
+        effects_main_layout = QVBoxLayout()
+
+        # First row of effects
+        effects_row1 = QHBoxLayout()
         self.rainbow_button = QPushButton("Rainbow")
         self.rainbow_button.clicked.connect(self.on_rainbow_clicked)
-        self.fade_button = QPushButton("Fade")
-        self.fade_button.clicked.connect(self.on_fade_clicked)
-        self.strobe_button = QPushButton("Strobe")
-        self.strobe_button.setObjectName("strobeButton")
-        self.strobe_button.clicked.connect(self.on_strobe_clicked)
-        effects_layout.addWidget(self.rainbow_button)
-        effects_layout.addWidget(self.fade_button)
-        effects_layout.addWidget(self.strobe_button)
-        effects_group.setLayout(effects_layout)
+        self.flash_button = QPushButton("Flash")
+        self.flash_button.clicked.connect(self.on_flash_clicked)
+        self.rainbow_flash_button = QPushButton("Rainbow Flash")
+        self.rainbow_flash_button.clicked.connect(self.on_rainbow_flash_clicked)
+        effects_row1.addWidget(self.rainbow_button)
+        effects_row1.addWidget(self.flash_button)
+        effects_row1.addWidget(self.rainbow_flash_button)
+        effects_main_layout.addLayout(effects_row1)
+
+        # Second row of effects
+        effects_row2 = QHBoxLayout()
+        self.breathing_button = QPushButton("Breathing")
+        self.breathing_button.clicked.connect(self.on_breathing_clicked)
+        self.jump_button = QPushButton("Jump")
+        self.jump_button.clicked.connect(self.on_jump_clicked)
+        effects_row2.addWidget(self.breathing_button)
+        effects_row2.addWidget(self.jump_button)
+        effects_main_layout.addLayout(effects_row2)
+
+        effects_group.setLayout(effects_main_layout)
         main_layout.addWidget(effects_group)
 
         main_layout.addStretch()
@@ -380,15 +397,33 @@ class LEDController(QWidget):
         self.on_button.setEnabled(enabled)
         self.off_button.setEnabled(enabled)
         self.rainbow_button.setEnabled(enabled)
-        self.fade_button.setEnabled(enabled)
-        self.strobe_button.setEnabled(enabled)
+        self.flash_button.setEnabled(enabled)
+        self.rainbow_flash_button.setEnabled(enabled)
+        self.breathing_button.setEnabled(enabled)
+        self.jump_button.setEnabled(enabled)
+
+    def _stop_loop_tasks(self) -> None:
+        """Stop any running infinite loop tasks (jump, flash, rainbow flash)."""
+        if self._jump_task and not self._jump_task.done():
+            self._jump_task.cancel()
+            self._jump_task = None
+        if self._flash_task and not self._flash_task.done():
+            self._flash_task.cancel()
+            self._flash_task = None
+        if self._rainbow_flash_task and not self._rainbow_flash_task.done():
+            self._rainbow_flash_task.cancel()
+            self._rainbow_flash_task = None
 
     def _start_operation(self) -> bool:
         """
         Try to start an operation. Returns True if operation can proceed.
 
         If another operation is in progress, returns False.
+        Stops any running loop tasks.
         """
+        # Stop loop tasks if running
+        self._stop_loop_tasks()
+
         if self._operation_in_progress:
             return False
         self._operation_in_progress = True
@@ -551,8 +586,8 @@ class LEDController(QWidget):
         if red == 0 and green == 0 and blue == 0:
             red, green, blue = 255, 0, 0
 
-        # Set color first, then turn on (some LEDs need color before turn on works)
-        await self.led_instance.set_color_to_rgb(red, green, blue)
+        # Set color first with full brightness, then turn on
+        await self.led_instance.set_color_to_rgb(red, green, blue, brightness=255)
         await self.led_instance.turn_on()
 
     def update_color(self) -> None:
@@ -681,78 +716,136 @@ class LEDController(QWidget):
             self._end_operation()
 
     @asyncSlot()
-    async def on_fade_clicked(self) -> None:
-        """Handle fade colors button click."""
-        if not self._start_operation():
-            return
-        try:
-            if not self.led_instance.is_connected:
-                await self.led_instance.connect()
-            await self.fade_colors()
-        except LEDOperationCancelledError:
-            LOGGER.error("Fade colors failed: Operation cancelled")
-            QMessageBox.warning(
-                self,
-                "Fade Colors Error",
-                "Failed to fade colors: Operation was cancelled.\n\n"
-                "Make sure:\n"
-                "• No other apps are connected to the LED\n"
-                "• The LED device is powered on\n"
-                "• Try using 'Reconnect' button first",
-            )
-        except BlueLightsError as e:
-            LOGGER.error(f"Fade colors error: {e}")
-            QMessageBox.warning(self, "Fade Colors Error", f"Failed to fade colors: {e}")
-        finally:
-            self._end_operation()
+    async def on_flash_clicked(self) -> None:
+        """Handle flash button click - fast flashing colors with black between."""
+        # Stop any existing loop tasks
+        self._stop_loop_tasks()
 
-    async def fade_colors(self) -> None:
-        """Execute fade effect from current color to red."""
-        start_color = (
-            self.red_slider.value(),
-            self.green_slider.value(),
-            self.blue_slider.value(),
-        )
-        end_color = (255, 0, 0)
-        await self.led_instance.fade_to_color(start_color, end_color, 5.0)
+        async def _flash_loop() -> None:
+            """Infinite loop flashing colors with black between."""
+            colors = [
+                (0, 255, 0),      # Green
+                (0, 255, 255),    # Cyan
+                (0, 0, 255),      # Blue
+                (128, 0, 255),    # Purple
+                (255, 0, 0),      # Red
+                (255, 255, 0),    # Yellow
+                (255, 128, 0),    # Orange
+            ]
+            try:
+                if not self.led_instance.is_connected:
+                    await self.led_instance.connect()
+
+                LOGGER.info("Starting flash effect (infinite loop)...")
+                while True:
+                    for color in colors:
+                        await self.led_instance.set_color_to_rgb(*color)
+                        await asyncio.sleep(0.15)
+                        await self.led_instance.set_color_to_rgb(0, 0, 0)  # Black
+                        await asyncio.sleep(0.1)
+            except asyncio.CancelledError:
+                LOGGER.info("Flash effect stopped.")
+            except BlueLightsError as e:
+                LOGGER.error(f"Flash error: {e}")
+
+        self._flash_task = asyncio.create_task(_flash_loop())
 
     @asyncSlot()
-    async def on_strobe_clicked(self) -> None:
-        """Handle strobe button click."""
+    async def on_rainbow_flash_clicked(self) -> None:
+        """Handle rainbow flash button click - flash through all rainbow colors."""
+        # Stop any existing loop tasks
+        self._stop_loop_tasks()
+
+        async def _rainbow_flash_loop() -> None:
+            """Infinite loop flashing through rainbow colors with black between."""
+            import colorsys
+            try:
+                if not self.led_instance.is_connected:
+                    await self.led_instance.connect()
+
+                LOGGER.info("Starting rainbow flash effect (infinite loop)...")
+                hue = 0.0
+                while True:
+                    # Convert HSV to RGB (full saturation and value)
+                    r, g, b = [int(c * 255) for c in colorsys.hsv_to_rgb(hue, 1.0, 1.0)]
+                    await self.led_instance.set_color_to_rgb(r, g, b)
+                    await asyncio.sleep(0.15)
+                    await self.led_instance.set_color_to_rgb(0, 0, 0)  # Black
+                    await asyncio.sleep(0.1)
+                    hue = (hue + 0.05) % 1.0  # Step through hue
+            except asyncio.CancelledError:
+                LOGGER.info("Rainbow flash effect stopped.")
+            except BlueLightsError as e:
+                LOGGER.error(f"Rainbow flash error: {e}")
+
+        self._rainbow_flash_task = asyncio.create_task(_rainbow_flash_loop())
+
+    @asyncSlot()
+    async def on_breathing_clicked(self) -> None:
+        """Handle breathing button click."""
         if not self._start_operation():
             return
         try:
             if not self.led_instance.is_connected:
                 await self.led_instance.connect()
 
-            # Use current slider color, or white if all zeros
+            # Use current slider color, or red if all zeros
             red = self.red_slider.value()
             green = self.green_slider.value()
             blue = self.blue_slider.value()
             if red == 0 and green == 0 and blue == 0:
-                red, green, blue = 255, 255, 255
+                red, green, blue = 255, 0, 0
 
-            await self.led_instance.strobe_light(
+            await self.led_instance.breathing_light(
                 color=(red, green, blue),
-                duration=2.0,
-                flashes=10,
+                duration=3.0,
+                cycles=3,
             )
         except LEDOperationCancelledError:
-            LOGGER.error("Strobe failed: Operation cancelled")
+            LOGGER.error("Breathing failed: Operation cancelled")
             QMessageBox.warning(
                 self,
-                "Strobe Error",
-                "Failed to start strobe: Operation was cancelled.\n\n"
+                "Breathing Error",
+                "Failed to start breathing effect: Operation was cancelled.\n\n"
                 "Make sure:\n"
                 "• No other apps are connected to the LED\n"
                 "• The LED device is powered on\n"
                 "• Try using 'Reconnect' button first",
             )
         except BlueLightsError as e:
-            LOGGER.error(f"Strobe error: {e}")
-            QMessageBox.warning(self, "Strobe Error", f"Failed to start strobe: {e}")
+            LOGGER.error(f"Breathing error: {e}")
+            QMessageBox.warning(self, "Breathing Error", f"Failed to start breathing effect: {e}")
         finally:
             self._end_operation()
+
+    @asyncSlot()
+    async def on_jump_clicked(self) -> None:
+        """Handle jump button click - start infinite RGB jump loop."""
+        # Stop any existing loop tasks
+        self._stop_loop_tasks()
+
+        async def _jump_loop() -> None:
+            """Infinite loop jumping between red, green, blue."""
+            colors = [
+                (255, 0, 0),    # Red
+                (0, 255, 0),    # Green
+                (0, 0, 255),    # Blue
+            ]
+            try:
+                if not self.led_instance.is_connected:
+                    await self.led_instance.connect()
+
+                LOGGER.info("Starting jump effect (infinite loop)...")
+                while True:
+                    for color in colors:
+                        await self.led_instance.set_color_to_rgb(*color)
+                        await asyncio.sleep(0.5)
+            except asyncio.CancelledError:
+                LOGGER.info("Jump effect stopped.")
+            except BlueLightsError as e:
+                LOGGER.error(f"Jump error: {e}")
+
+        self._jump_task = asyncio.create_task(_jump_loop())
 
 
 def main() -> None:
