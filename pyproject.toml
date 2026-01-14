@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=69.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bluelights"
+version = "1.0.0"
+description = "Bluetooth LED controller for MohuanLED devices"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+keywords = ["bluetooth", "led", "ble", "mohuanled", "smart-lighting"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Home Automation",
+    "Topic :: System :: Hardware",
+]
+dependencies = [
+    "bleak>=2.1.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+gui = [
+    "PyQt6>=6.10.0",
+    "PyQt6-Qt6>=6.10.0",
+    "PyQt6-sip>=13.6.0",
+    "qasync>=0.27.1",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "mypy>=1.8.0",
+    "ruff>=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/MohuanLED-Bluetooth_LED"
+Repository = "https://github.com/yourusername/MohuanLED-Bluetooth_LED"
+Issues = "https://github.com/yourusername/MohuanLED-Bluetooth_LED/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bluelights*", "gui*"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

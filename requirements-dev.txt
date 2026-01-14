@@ -1,0 +1,24 @@
+# Development dependencies
+# Install with: pip install -r requirements-dev.txt
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+
+# Type checking
+mypy>=1.8.0
+
+# Linting and formatting
+ruff>=0.1.0
+
+# Build and publish tools
+build>=1.0.0
+twine>=5.0.0
+wheel>=0.42.0
+setuptools>=69.0.0
+
+# Documentation
+sphinx>=7.0.0
+
+# Development utilities
+rich>=13.0.0
