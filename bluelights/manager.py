@@ -232,12 +232,13 @@ class BJLEDInstance:
             finally:
                 self._client = None
 
-    async def _write(self, data: bytearray) -> None:
+    async def _write(self, data: bytearray, retry_on_failure: bool = True) -> None:
         """
         Write data to the LED device.
 
         Args:
             data: The bytearray command to send.
+            retry_on_failure: If True, will reconnect and retry once on write failure.
 
         Raises:
             LEDCommandError: If the write operation fails.
@@ -250,7 +251,15 @@ class BJLEDInstance:
             await self._client.write_gatt_char(self._uuid, data, response=False)
             LOGGER.debug(f"Command {data.hex()} sent to LED at {self._mac}")
         except BleakError as e:
-            raise LEDCommandError(f"Failed to write command: {e}", bytes(data)) from e
+            if retry_on_failure:
+                LOGGER.warning(f"Write failed, attempting reconnect: {e}")
+                # Force disconnect and reconnect
+                await self._disconnect()
+                await self._ensure_connected()
+                # Retry write without retry flag to avoid infinite loop
+                await self._write(data, retry_on_failure=False)
+            else:
+                raise LEDCommandError(f"Failed to write command: {e}", bytes(data)) from e
 
     async def turn_on(self) -> None:
         """
