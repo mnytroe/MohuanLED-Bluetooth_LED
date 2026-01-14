@@ -13,8 +13,17 @@ from bleak.exc import BleakError
 from dotenv import load_dotenv
 
 from .commands import (
+    BREATHING_STEPS,
+    DEFAULT_CONNECTION_RETRIES,
+    DEFAULT_CONNECTION_TIMEOUT,
+    DEFAULT_EFFECT_SPEED,
+    DEFAULT_RETRY_DELAY,
+    DEFAULT_SCAN_TIMEOUT,
+    DEFAULT_WRITE_TIMEOUT,
+    FADE_STEPS,
     LEDCommand,
     LEDDeviceInfo,
+    RAINBOW_HUE_STEPS,
     build_color_command,
     validate_brightness,
     validate_rgb_value,
@@ -23,6 +32,8 @@ from .exceptions import (
     LEDCommandError,
     LEDConnectionError,
     LEDNotFoundError,
+    LEDOperationCancelledError,
+    LEDTimeoutError,
     LEDUUIDError,
 )
 from .scanner import Scanner
@@ -78,10 +89,11 @@ class BJLEDInstance:
         self._delay = delay
         self._client: BleakClient | None = None
         self._is_on: bool | None = None
-        self._rgb_color: tuple[int, int, int] | None = None
+        self._rgb_color: tuple[int, int, int] | None = None  # Original RGB (before brightness)
+        self._actual_rgb_color: tuple[int, int, int] | None = None  # Actual sent RGB (after brightness)
         self._brightness: int = LEDDeviceInfo.DEFAULT_BRIGHTNESS
         self._effect: str | None = None
-        self._effect_speed: int = 0x64
+        self._effect_speed: int = DEFAULT_EFFECT_SPEED
         self._color_mode: str = "RGB"
         self._scanner = Scanner()
         self._running_task: asyncio.Task[None] | None = None
@@ -123,8 +135,13 @@ class BJLEDInstance:
 
     @property
     def current_color(self) -> tuple[int, int, int] | None:
-        """Get the current RGB color (None if unknown)."""
+        """Get the current RGB color as set by user (before brightness applied)."""
         return self._rgb_color
+
+    @property
+    def actual_color(self) -> tuple[int, int, int] | None:
+        """Get the actual RGB color sent to device (after brightness applied)."""
+        return self._actual_rgb_color
 
     async def initialize(self) -> None:
         """
@@ -169,7 +186,29 @@ class BJLEDInstance:
                 await self._disconnect()
         self._uuid = None
 
-    async def _ensure_connected(self, retries: int = 3) -> None:
+    def _is_cancelled_error(self, error: Exception) -> bool:
+        """Check if an error indicates a cancelled operation (e.g., Windows BLE cancellation)."""
+        error_msg = str(error).lower()
+        # Windows error codes for cancelled operations
+        if "winerror -2147023673" in error_msg:  # ERROR_CANCELLED
+            return True
+        if "cancelled" in error_msg or "canceled" in error_msg:
+            return True
+        if "avbrutt" in error_msg:  # Norwegian for "cancelled"
+            return True
+        return False
+
+    def _wrap_ble_error(self, error: BleakError) -> LEDConnectionError:
+        """Wrap a BleakError in the appropriate custom exception type."""
+        if self._is_cancelled_error(error):
+            return LEDOperationCancelledError(
+                "BLE operation was cancelled (another app may be connected)",
+                mac_address=self._mac,
+                cause=str(error),
+            )
+        return LEDConnectionError(str(error), self._mac)
+
+    async def _ensure_connected(self, retries: int = DEFAULT_CONNECTION_RETRIES) -> None:
         """
         Ensure connection to the LED device with retry logic.
 
@@ -178,6 +217,7 @@ class BJLEDInstance:
 
         Raises:
             LEDConnectionError: If MAC address or UUID is not set, or connection fails.
+            LEDOperationCancelledError: If connection was cancelled by another app.
         """
         from bleak import BleakScanner
 
@@ -193,14 +233,16 @@ class BJLEDInstance:
             try:
                 # On Windows, we need to scan first to "wake up" the device
                 LOGGER.debug("Scanning for device...")
-                device = await BleakScanner.find_device_by_address(self._mac, timeout=5.0)
+                device = await BleakScanner.find_device_by_address(
+                    self._mac, timeout=DEFAULT_SCAN_TIMEOUT
+                )
                 if device:
                     LOGGER.debug(f"Found device: {device.name}")
-                    self._client = BleakClient(device, timeout=20.0)
+                    self._client = BleakClient(device, timeout=DEFAULT_CONNECTION_TIMEOUT)
                 else:
                     # Try direct connection anyway
                     LOGGER.debug("Device not found in scan, trying direct connection...")
-                    self._client = BleakClient(self._mac, timeout=20.0)
+                    self._client = BleakClient(self._mac, timeout=DEFAULT_CONNECTION_TIMEOUT)
 
                 await self._client.connect()
                 LOGGER.debug(f"Connected to LED at {self._mac}")
@@ -208,18 +250,23 @@ class BJLEDInstance:
             except BleakError as e:
                 last_error = e
                 LOGGER.warning(f"Connection attempt {attempt + 1} failed: {e}")
+                # Check if cancelled - don't retry if another app has the device
+                if self._is_cancelled_error(e):
+                    raise self._wrap_ble_error(e) from e
                 # Clean up failed client
                 if self._client:
                     try:
                         await self._client.disconnect()
-                    except Exception:
-                        pass
+                    except BleakError:
+                        pass  # Ignore disconnect errors during cleanup
                     self._client = None
                 # Wait before retry
                 if attempt < retries - 1:
-                    await asyncio.sleep(2.0)
+                    await asyncio.sleep(DEFAULT_RETRY_DELAY)
 
-        raise LEDConnectionError(f"Failed to connect after {retries} attempts: {last_error}", self._mac)
+        if last_error:
+            raise self._wrap_ble_error(last_error) from last_error
+        raise LEDConnectionError(f"Failed to connect after {retries} attempts", self._mac)
 
     async def _disconnect(self) -> None:
         """Disconnect from the LED device."""
@@ -232,32 +279,80 @@ class BJLEDInstance:
             finally:
                 self._client = None
 
-    async def _write(self, data: bytearray, retry_on_failure: bool = True) -> None:
+    async def connect(self, retries: int = DEFAULT_CONNECTION_RETRIES) -> None:
         """
-        Write data to the LED device.
+        Connect to the LED device.
+
+        This is the public method for establishing a connection.
+        Use this instead of accessing _ensure_connected directly.
+
+        Args:
+            retries: Number of connection attempts before giving up.
+
+        Raises:
+            LEDConnectionError: If connection fails.
+            LEDOperationCancelledError: If connection was cancelled by another app.
+        """
+        await self._ensure_connected(retries)
+
+    async def disconnect(self) -> None:
+        """
+        Disconnect from the LED device.
+
+        This is the public method for disconnecting.
+        Use this instead of accessing _disconnect directly.
+        """
+        await self._disconnect()
+
+    async def _write(
+        self,
+        data: bytearray,
+        retry_on_failure: bool = True,
+        timeout: float = DEFAULT_WRITE_TIMEOUT,
+    ) -> None:
+        """
+        Write data to the LED device with timeout.
 
         Args:
             data: The bytearray command to send.
             retry_on_failure: If True, will reconnect and retry once on write failure.
+            timeout: Timeout for the write operation in seconds.
 
         Raises:
             LEDCommandError: If the write operation fails.
+            LEDTimeoutError: If the write operation times out.
+            LEDOperationCancelledError: If the operation was cancelled.
         """
         await self._ensure_connected()
         # After _ensure_connected, _client and _uuid are guaranteed to be set
         assert self._client is not None
         assert self._uuid is not None
         try:
-            await self._client.write_gatt_char(self._uuid, data, response=False)
+            await asyncio.wait_for(
+                self._client.write_gatt_char(self._uuid, data, response=False),
+                timeout=timeout,
+            )
             LOGGER.debug(f"Command {data.hex()} sent to LED at {self._mac}")
+        except asyncio.TimeoutError as e:
+            raise LEDTimeoutError(
+                "Write operation timed out",
+                mac_address=self._mac,
+                timeout=timeout,
+            ) from e
         except BleakError as e:
+            if self._is_cancelled_error(e):
+                raise LEDOperationCancelledError(
+                    "Write operation was cancelled",
+                    mac_address=self._mac,
+                    cause=str(e),
+                ) from e
             if retry_on_failure:
                 LOGGER.warning(f"Write failed, attempting reconnect: {e}")
                 # Force disconnect and reconnect
                 await self._disconnect()
                 await self._ensure_connected()
                 # Retry write without retry flag to avoid infinite loop
-                await self._write(data, retry_on_failure=False)
+                await self._write(data, retry_on_failure=False, timeout=timeout)
             else:
                 raise LEDCommandError(f"Failed to write command: {e}", bytes(data)) from e
 
@@ -315,15 +410,18 @@ class BJLEDInstance:
             brightness = validate_brightness(brightness)
             self._brightness = brightness
 
-        # Apply brightness scaling
-        red = int(red * brightness / 255)
-        green = int(green * brightness / 255)
-        blue = int(blue * brightness / 255)
-
-        rgb_packet = build_color_command(red, green, blue)
-        await self._write(rgb_packet)
+        # Store original RGB (before brightness)
         self._rgb_color = (red, green, blue)
-        LOGGER.info(f"LED at {self._mac} set to RGB color: {self._rgb_color}")
+
+        # Apply brightness scaling for actual command
+        actual_red = int(red * brightness / 255)
+        actual_green = int(green * brightness / 255)
+        actual_blue = int(blue * brightness / 255)
+
+        rgb_packet = build_color_command(actual_red, actual_green, actual_blue)
+        await self._write(rgb_packet)
+        self._actual_rgb_color = (actual_red, actual_green, actual_blue)
+        LOGGER.info(f"LED at {self._mac} set to RGB color: {self._rgb_color} (actual: {self._actual_rgb_color})")
 
     async def fade_to_color(
         self,
@@ -339,16 +437,15 @@ class BJLEDInstance:
             end_color: Ending RGB color tuple.
             duration: Duration of the fade in seconds.
         """
-        steps = 100
-        delay = duration / steps
+        delay = duration / FADE_STEPS
 
         r1, g1, b1 = start_color
         r2, g2, b2 = end_color
 
-        for step in range(steps + 1):
-            red = int(r1 + (r2 - r1) * step / steps)
-            green = int(g1 + (g2 - g1) * step / steps)
-            blue = int(b1 + (b2 - b1) * step / steps)
+        for step in range(FADE_STEPS + 1):
+            red = int(r1 + (r2 - r1) * step / FADE_STEPS)
+            green = int(g1 + (g2 - g1) * step / FADE_STEPS)
+            blue = int(b1 + (b2 - b1) * step / FADE_STEPS)
 
             await self.set_color_to_rgb(red, green, blue)
             await asyncio.sleep(delay)
@@ -402,11 +499,10 @@ class BJLEDInstance:
         Args:
             duration_per_color: Total duration for one complete rainbow cycle in seconds.
         """
-        steps = 360
-        delay = duration_per_color / steps
+        delay = duration_per_color / RAINBOW_HUE_STEPS
 
-        for hue in range(steps):
-            r, g, b = [int(c * 255) for c in colorsys.hsv_to_rgb(hue / 360, 1.0, 1.0)]
+        for hue in range(RAINBOW_HUE_STEPS):
+            r, g, b = [int(c * 255) for c in colorsys.hsv_to_rgb(hue / RAINBOW_HUE_STEPS, 1.0, 1.0)]
             await self.set_color_to_rgb(r, g, b)
             await asyncio.sleep(delay)
 
@@ -420,19 +516,18 @@ class BJLEDInstance:
             color: RGB color tuple for the breathing effect.
             duration: Total duration of one breath cycle in seconds.
         """
-        steps = 100
-        delay = duration / (steps * 2)
+        delay = duration / (BREATHING_STEPS * 2)
 
         r, g, b = color
         # Fade in
-        for step in range(steps):
-            brightness = int((step / steps) * 255)
+        for step in range(BREATHING_STEPS):
+            brightness = int((step / BREATHING_STEPS) * 255)
             await self.set_color_to_rgb(r, g, b, brightness)
             await asyncio.sleep(delay)
 
         # Fade out
-        for step in range(steps, 0, -1):
-            brightness = int((step / steps) * 255)
+        for step in range(BREATHING_STEPS, 0, -1):
+            brightness = int((step / BREATHING_STEPS) * 255)
             await self.set_color_to_rgb(r, g, b, brightness)
             await asyncio.sleep(delay)
 
@@ -484,13 +579,41 @@ class BJLEDInstance:
             LOGGER.info("Color cycle cancelled.")
             raise
 
-    def start_color_cycle(
+    async def start_color_cycle(
         self,
         colors: Sequence[tuple[int, int, int]],
         duration_per_color: float,
     ) -> asyncio.Task[None]:
         """
         Start a background color cycle task.
+
+        This method properly awaits cleanup of any previous effect before starting
+        a new one to prevent task leaks.
+
+        Args:
+            colors: List of RGB color tuples to cycle through.
+            duration_per_color: Duration for each color transition in seconds.
+
+        Returns:
+            The asyncio Task running the color cycle.
+        """
+        # Properly await cleanup of any existing effect
+        await self.stop_effect()
+        self._running_task = asyncio.create_task(
+            self.color_cycle(colors, duration_per_color)
+        )
+        return self._running_task
+
+    def start_color_cycle_sync(
+        self,
+        colors: Sequence[tuple[int, int, int]],
+        duration_per_color: float,
+    ) -> asyncio.Task[None]:
+        """
+        Start a background color cycle task synchronously.
+
+        Warning: This method cancels any existing effect without awaiting cleanup.
+        Prefer using start_color_cycle() when in an async context.
 
         Args:
             colors: List of RGB color tuples to cycle through.
@@ -506,7 +629,7 @@ class BJLEDInstance:
         return self._running_task
 
     async def stop_effect(self) -> None:
-        """Stop any currently running effect."""
+        """Stop any currently running effect and await cleanup."""
         if self._running_task and not self._running_task.done():
             self._running_task.cancel()
             try:
@@ -517,7 +640,11 @@ class BJLEDInstance:
             LOGGER.info("Stopped running effect.")
 
     def stop_effect_sync(self) -> None:
-        """Synchronously cancel any running effect (non-blocking)."""
+        """
+        Synchronously cancel any running effect (non-blocking).
+
+        Warning: This does not await task cleanup. Use stop_effect() when possible.
+        """
         if self._running_task and not self._running_task.done():
             self._running_task.cancel()
             self._running_task = None

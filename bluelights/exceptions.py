@@ -47,3 +47,33 @@ class LEDValueError(BlueLightsError):
     """Raised when an invalid value is provided to an LED method."""
 
     pass
+
+
+class LEDOperationCancelledError(LEDConnectionError):
+    """Raised when a BLE operation is cancelled (e.g., by another app or timeout)."""
+
+    def __init__(
+        self,
+        message: str = "Operation was cancelled",
+        mac_address: str | None = None,
+        cause: str | None = None,
+    ) -> None:
+        self.cause = cause
+        if cause:
+            message = f"{message}: {cause}"
+        super().__init__(message, mac_address)
+
+
+class LEDTimeoutError(LEDConnectionError):
+    """Raised when a BLE operation times out."""
+
+    def __init__(
+        self,
+        message: str = "Operation timed out",
+        mac_address: str | None = None,
+        timeout: float | None = None,
+    ) -> None:
+        self.timeout = timeout
+        if timeout:
+            message = f"{message} after {timeout}s"
+        super().__init__(message, mac_address)

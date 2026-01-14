@@ -26,6 +26,20 @@ class LEDDeviceInfo:
     MAX_BRIGHTNESS: int = 255
 
 
+# Connection and timing constants
+DEFAULT_WRITE_TIMEOUT: float = 5.0  # Timeout for BLE write operations in seconds
+DEFAULT_CONNECTION_RETRIES: int = 3  # Number of connection retry attempts
+DEFAULT_RETRY_DELAY: float = 2.0  # Delay between retry attempts in seconds
+DEFAULT_SCAN_TIMEOUT: float = 5.0  # Timeout for BLE device scanning
+DEFAULT_CONNECTION_TIMEOUT: float = 20.0  # Timeout for BLE connection
+
+# Effect constants
+RAINBOW_HUE_STEPS: int = 360  # Number of hue steps in rainbow cycle (full circle)
+FADE_STEPS: int = 100  # Number of steps for fade transitions
+BREATHING_STEPS: int = 100  # Number of steps for breathing effect
+DEFAULT_EFFECT_SPEED: int = 0x64  # Default effect speed (100)
+
+
 def build_color_command(red: int, green: int, blue: int) -> bytearray:
     """
     Build a color command packet for the LED device.

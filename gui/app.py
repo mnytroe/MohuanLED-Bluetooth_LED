@@ -8,6 +8,7 @@ import os
 import sys
 from pathlib import Path
 
+from bleak.exc import BleakError
 from dotenv import load_dotenv
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QIcon
@@ -15,6 +16,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QLabel,
     QMenu,
+    QMessageBox,
     QPushButton,
     QSlider,
     QSystemTrayIcon,
@@ -23,6 +25,14 @@ from PyQt6.QtWidgets import (
 )
 from qasync import QEventLoop, asyncSlot
 
+from bluelights.exceptions import (
+    BlueLightsError,
+    LEDCommandError,
+    LEDConnectionError,
+    LEDNotFoundError,
+    LEDOperationCancelledError,
+    LEDTimeoutError,
+)
 from bluelights.manager import BJLEDInstance as Instance
 
 LOGGER = logging.getLogger(__name__)
@@ -46,6 +56,9 @@ class LEDController(QWidget):
     - Color fade effects
     """
 
+    # Debounce delay for color slider updates (milliseconds)
+    COLOR_UPDATE_DEBOUNCE_MS: int = 50
+
     def __init__(self, led_instance: Instance, loop: asyncio.AbstractEventLoop) -> None:
         """
         Initialize the LED controller GUI.
@@ -57,8 +70,11 @@ class LEDController(QWidget):
         super().__init__()
         self.led_instance = led_instance
         self._loop = loop
+        self._color_update_task: asyncio.Task[None] | None = None
+        self._color_update_timer: QTimer | None = None
         self.init_ui()
         self.init_tray_icon()
+        self._setup_color_debounce()
 
     def init_ui(self) -> None:
         """Initialize the user interface components."""
@@ -140,6 +156,12 @@ class LEDController(QWidget):
         self.tray_icon.activated.connect(self.tray_icon_activated)
         self.tray_icon.show()
 
+    def _setup_color_debounce(self) -> None:
+        """Set up the debounce timer for color updates."""
+        self._color_update_timer = QTimer()
+        self._color_update_timer.setSingleShot(True)
+        self._color_update_timer.timeout.connect(self._execute_color_update)
+
     def tray_icon_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         """
         Handle tray icon activation events.
@@ -160,47 +182,52 @@ class LEDController(QWidget):
         """Initialize LED connection asynchronously."""
         try:
             await self.led_instance.initialize()
-            await self.led_instance._ensure_connected()
+            await self.led_instance.connect()
             LOGGER.info("LED initialized and connected successfully")
-        except Exception as e:
-            LOGGER.warning(f"LED initialization failed: {e}. You can try to reconnect using the Reconnect button.")
-            from PyQt6.QtWidgets import QMessageBox
-            error_msg = str(e)
-            # Check for specific error types
-            if "WinError -2147023673" in error_msg or "avbrutt" in error_msg.lower():
-                detailed_msg = (
-                    "Could not connect to LED device: Operation was cancelled.\n\n"
-                    "Possible causes:\n"
-                    "• Another app (Mohuan app, Windows BLE Explorer, etc.) is connected\n"
-                    "• The device is in use by another application\n"
-                    "• Bluetooth connection timeout\n\n"
-                    "Solution:\n"
-                    "• Close other apps that might be connected to the LED\n"
-                    "• Disconnect from other Bluetooth apps\n"
-                    "• Make sure the LED device is powered on and nearby\n"
-                    "• Try the 'Reconnect' button after closing other apps"
-                )
-            elif "connected" in error_msg.lower() or "already" in error_msg.lower() or "in use" in error_msg.lower():
-                detailed_msg = (
-                    f"Could not connect to LED device.\n\n"
-                    f"Error: {error_msg}\n\n"
-                    "Possible causes:\n"
-                    "• Another app (Mohuan app, Windows BLE Explorer, etc.) is connected\n"
-                    "• The device is in use by another application\n\n"
-                    "Solution:\n"
-                    "• Close other apps that might be connected to the LED\n"
-                    "• Disconnect from other Bluetooth apps\n"
-                    "• Try the 'Reconnect' button after closing other apps"
-                )
-            else:
-                detailed_msg = (
-                    f"Could not connect to LED device: {error_msg}\n\n"
-                    "You can try to reconnect using the 'Reconnect' button."
-                )
+        except LEDOperationCancelledError as e:
+            LOGGER.warning(f"LED initialization cancelled: {e}")
+            detailed_msg = (
+                "Could not connect to LED device: Operation was cancelled.\n\n"
+                "Possible causes:\n"
+                "• Another app (Mohuan app, Windows BLE Explorer, etc.) is connected\n"
+                "• The device is in use by another application\n"
+                "• Bluetooth connection timeout\n\n"
+                "Solution:\n"
+                "• Close other apps that might be connected to the LED\n"
+                "• Disconnect from other Bluetooth apps\n"
+                "• Make sure the LED device is powered on and nearby\n"
+                "• Try the 'Reconnect' button after closing other apps"
+            )
+            QMessageBox.warning(self, "LED Connection Failed", detailed_msg)
+        except LEDNotFoundError as e:
+            LOGGER.warning(f"LED not found: {e}")
+            detailed_msg = (
+                "Could not find LED device.\n\n"
+                "Possible causes:\n"
+                "• The LED device is not powered on\n"
+                "• The LED device is too far away\n"
+                "• Bluetooth is turned off\n\n"
+                "Solution:\n"
+                "• Make sure the LED device is powered on\n"
+                "• Move the LED device closer to the computer\n"
+                "• Check Bluetooth settings\n"
+                "• Try the 'Reconnect' button"
+            )
+            QMessageBox.warning(self, "LED Connection Failed", detailed_msg)
+        except LEDConnectionError as e:
+            LOGGER.warning(f"LED connection failed: {e}")
+            detailed_msg = (
+                f"Could not connect to LED device: {e}\n\n"
+                "You can try to reconnect using the 'Reconnect' button."
+            )
+            QMessageBox.warning(self, "LED Connection Failed", detailed_msg)
+        except BlueLightsError as e:
+            LOGGER.warning(f"LED initialization failed: {e}")
             QMessageBox.warning(
                 self,
                 "LED Connection Failed",
-                detailed_msg,
+                f"Could not connect to LED device: {e}\n\n"
+                "You can try to reconnect using the 'Reconnect' button.",
             )
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt method name
@@ -218,65 +245,63 @@ class LEDController(QWidget):
             # Visual feedback: red strobe effect
             await self.led_instance.strobe_light(color=(255, 0, 0), duration=2.0, flashes=5)
             await self.led_instance.turn_off()
-            await self.led_instance._disconnect()
-        except Exception as e:
+            await self.led_instance.disconnect()
+        except BlueLightsError as e:
             LOGGER.error(f"Error during exit: {e}")
+        except BleakError as e:
+            LOGGER.error(f"BLE error during exit: {e}")
         finally:
             QApplication.quit()
 
     async def reconnect(self) -> None:
         """Disconnect and reconnect to the LED device."""
         LOGGER.info("Reconnecting to LED...")
-        from PyQt6.QtWidgets import QMessageBox
         try:
             # Disconnect first if connected
             if self.led_instance.is_connected:
-                await self.led_instance._disconnect()
+                await self.led_instance.disconnect()
             # Try to ensure connection (will reconnect if needed)
-            await self.led_instance._ensure_connected()
+            await self.led_instance.connect()
             LOGGER.info("Reconnected successfully!")
             QMessageBox.information(self, "Success", "Successfully reconnected to LED device!")
-        except Exception as e:
-            LOGGER.error(f"Reconnect failed: {e}")
-            error_msg = str(e)
-            if "not found" in error_msg.lower():
-                detailed_msg = (
-                    "Reconnection failed: Device not found.\n\n"
-                    "Possible causes:\n"
-                    "• The LED device is not powered on\n"
-                    "• The LED device is too far away\n"
-                    "• Bluetooth is turned off\n"
-                    "• Another app is using the device\n\n"
-                    "Solution:\n"
-                    "• Make sure the LED device is powered on\n"
-                    "• Move the LED device closer to the computer\n"
-                    "• Check Bluetooth settings\n"
-                    "• Close other apps that might be connected\n"
-                    "• Wait a few seconds and try again"
-                )
-            elif "WinError -2147023673" in error_msg or "avbrutt" in error_msg.lower():
-                detailed_msg = (
-                    "Reconnection failed: Operation was cancelled.\n\n"
-                    "Possible causes:\n"
-                    "• Another app (Mohuan app, Windows BLE Explorer, etc.) is connected\n"
-                    "• The device is in use by another application\n"
-                    "• Bluetooth connection timeout\n\n"
-                    "Solution:\n"
-                    "• Close other apps that might be connected to the LED\n"
-                    "• Disconnect from other Bluetooth apps\n"
-                    "• Make sure the LED device is powered on and nearby\n"
-                    "• Wait a few seconds and try again"
-                )
-            elif "connected" in error_msg.lower() or "already" in error_msg.lower() or "in use" in error_msg.lower():
-                detailed_msg = (
-                    f"Reconnection failed.\n\n"
-                    f"Error: {error_msg}\n\n"
-                    "The device may be connected to another app.\n"
-                    "Please close other Bluetooth apps and try again."
-                )
-            else:
-                detailed_msg = f"Reconnection failed: {error_msg}"
+        except LEDNotFoundError:
+            LOGGER.error("Reconnect failed: Device not found")
+            detailed_msg = (
+                "Reconnection failed: Device not found.\n\n"
+                "Possible causes:\n"
+                "• The LED device is not powered on\n"
+                "• The LED device is too far away\n"
+                "• Bluetooth is turned off\n"
+                "• Another app is using the device\n\n"
+                "Solution:\n"
+                "• Make sure the LED device is powered on\n"
+                "• Move the LED device closer to the computer\n"
+                "• Check Bluetooth settings\n"
+                "• Close other apps that might be connected\n"
+                "• Wait a few seconds and try again"
+            )
             QMessageBox.warning(self, "Reconnect Failed", detailed_msg)
+        except LEDOperationCancelledError:
+            LOGGER.error("Reconnect failed: Operation cancelled")
+            detailed_msg = (
+                "Reconnection failed: Operation was cancelled.\n\n"
+                "Possible causes:\n"
+                "• Another app (Mohuan app, Windows BLE Explorer, etc.) is connected\n"
+                "• The device is in use by another application\n"
+                "• Bluetooth connection timeout\n\n"
+                "Solution:\n"
+                "• Close other apps that might be connected to the LED\n"
+                "• Disconnect from other Bluetooth apps\n"
+                "• Make sure the LED device is powered on and nearby\n"
+                "• Wait a few seconds and try again"
+            )
+            QMessageBox.warning(self, "Reconnect Failed", detailed_msg)
+        except LEDConnectionError as e:
+            LOGGER.error(f"Reconnect failed: {e}")
+            QMessageBox.warning(self, "Reconnect Failed", f"Reconnection failed: {e}")
+        except BlueLightsError as e:
+            LOGGER.error(f"Reconnect failed: {e}")
+            QMessageBox.warning(self, "Reconnect Failed", f"Reconnection failed: {e}")
 
     async def turn_on_with_initial_color(self) -> None:
         """Turn on LEDs and set initial color based on slider values."""
@@ -293,14 +318,32 @@ class LEDController(QWidget):
         await self.led_instance.set_color_to_rgb(red, green, blue)
 
     def update_color(self) -> None:
-        """Update LED color when sliders change."""
+        """Update LED color when sliders change (debounced)."""
+        # Restart the debounce timer - actual update happens after timer fires
+        if self._color_update_timer:
+            self._color_update_timer.start(self.COLOR_UPDATE_DEBOUNCE_MS)
+
+    def _execute_color_update(self) -> None:
+        """Execute the actual color update after debounce delay."""
+        # Cancel any pending color update task
+        if self._color_update_task and not self._color_update_task.done():
+            self._color_update_task.cancel()
+
         red = self.red_slider.value()
         green = self.green_slider.value()
         blue = self.blue_slider.value()
-        try:
-            asyncio.create_task(self.led_instance.set_color_to_rgb(red, green, blue))
-        except Exception as e:
-            LOGGER.error(f"Update color error: {e}")
+
+        async def _do_update() -> None:
+            try:
+                await self.led_instance.set_color_to_rgb(red, green, blue)
+            except asyncio.CancelledError:
+                pass  # Task was cancelled, this is expected
+            except BlueLightsError as e:
+                LOGGER.error(f"Update color error: {e}")
+            except BleakError as e:
+                LOGGER.error(f"BLE error updating color: {e}")
+
+        self._color_update_task = asyncio.create_task(_do_update())
 
     @asyncSlot()
     async def on_reconnect_clicked(self) -> None:
@@ -312,92 +355,88 @@ class LEDController(QWidget):
         """Handle turn on button click."""
         try:
             if not self.led_instance.is_connected:
-                await self.led_instance._ensure_connected()
+                await self.led_instance.connect()
             await self.turn_on_with_initial_color()
-        except Exception as e:
+        except LEDOperationCancelledError:
+            LOGGER.error("Turn on failed: Operation cancelled")
+            QMessageBox.warning(
+                self,
+                "Turn On Error",
+                "Failed to turn on LED: Operation was cancelled.\n\n"
+                "Make sure:\n"
+                "• No other apps are connected to the LED\n"
+                "• The LED device is powered on\n"
+                "• Try using 'Reconnect' button first",
+            )
+        except BlueLightsError as e:
             LOGGER.error(f"Turn on error: {e}")
-            from PyQt6.QtWidgets import QMessageBox
-            error_msg = str(e)
-            if "WinError -2147023673" in error_msg or "avbrutt" in error_msg.lower():
-                detailed_msg = (
-                    "Failed to turn on LED: Operation was cancelled.\n\n"
-                    "Make sure:\n"
-                    "• No other apps are connected to the LED\n"
-                    "• The LED device is powered on\n"
-                    "• Try using 'Reconnect' button first"
-                )
-            else:
-                detailed_msg = f"Failed to turn on LED: {error_msg}"
-            QMessageBox.warning(self, "Turn On Error", detailed_msg)
+            QMessageBox.warning(self, "Turn On Error", f"Failed to turn on LED: {e}")
 
     @asyncSlot()
     async def on_turn_off_clicked(self) -> None:
         """Handle turn off button click."""
         try:
             if not self.led_instance.is_connected:
-                await self.led_instance._ensure_connected()
+                await self.led_instance.connect()
             await self.led_instance.turn_off()
-        except Exception as e:
+        except LEDOperationCancelledError:
+            LOGGER.error("Turn off failed: Operation cancelled")
+            QMessageBox.warning(
+                self,
+                "Turn Off Error",
+                "Failed to turn off LED: Operation was cancelled.\n\n"
+                "Make sure:\n"
+                "• No other apps are connected to the LED\n"
+                "• The LED device is powered on\n"
+                "• Try using 'Reconnect' button first",
+            )
+        except BlueLightsError as e:
             LOGGER.error(f"Turn off error: {e}")
-            from PyQt6.QtWidgets import QMessageBox
-            error_msg = str(e)
-            if "WinError -2147023673" in error_msg or "avbrutt" in error_msg.lower():
-                detailed_msg = (
-                    "Failed to turn off LED: Operation was cancelled.\n\n"
-                    "Make sure:\n"
-                    "• No other apps are connected to the LED\n"
-                    "• The LED device is powered on\n"
-                    "• Try using 'Reconnect' button first"
-                )
-            else:
-                detailed_msg = f"Failed to turn off LED: {error_msg}"
-            QMessageBox.warning(self, "Turn Off Error", detailed_msg)
+            QMessageBox.warning(self, "Turn Off Error", f"Failed to turn off LED: {e}")
 
     @asyncSlot()
     async def on_rainbow_clicked(self) -> None:
         """Handle rainbow cycle button click."""
         try:
             if not self.led_instance.is_connected:
-                await self.led_instance._ensure_connected()
+                await self.led_instance.connect()
             await self.led_instance.rainbow_cycle(5.0)
-        except Exception as e:
+        except LEDOperationCancelledError:
+            LOGGER.error("Rainbow cycle failed: Operation cancelled")
+            QMessageBox.warning(
+                self,
+                "Rainbow Cycle Error",
+                "Failed to start rainbow cycle: Operation was cancelled.\n\n"
+                "Make sure:\n"
+                "• No other apps are connected to the LED\n"
+                "• The LED device is powered on\n"
+                "• Try using 'Reconnect' button first",
+            )
+        except BlueLightsError as e:
             LOGGER.error(f"Rainbow cycle error: {e}")
-            from PyQt6.QtWidgets import QMessageBox
-            error_msg = str(e)
-            if "WinError -2147023673" in error_msg or "avbrutt" in error_msg.lower():
-                detailed_msg = (
-                    "Failed to start rainbow cycle: Operation was cancelled.\n\n"
-                    "Make sure:\n"
-                    "• No other apps are connected to the LED\n"
-                    "• The LED device is powered on\n"
-                    "• Try using 'Reconnect' button first"
-                )
-            else:
-                detailed_msg = f"Failed to start rainbow cycle: {error_msg}"
-            QMessageBox.warning(self, "Rainbow Cycle Error", detailed_msg)
+            QMessageBox.warning(self, "Rainbow Cycle Error", f"Failed to start rainbow cycle: {e}")
 
     @asyncSlot()
     async def on_fade_clicked(self) -> None:
         """Handle fade colors button click."""
         try:
             if not self.led_instance.is_connected:
-                await self.led_instance._ensure_connected()
+                await self.led_instance.connect()
             await self.fade_colors()
-        except Exception as e:
+        except LEDOperationCancelledError:
+            LOGGER.error("Fade colors failed: Operation cancelled")
+            QMessageBox.warning(
+                self,
+                "Fade Colors Error",
+                "Failed to fade colors: Operation was cancelled.\n\n"
+                "Make sure:\n"
+                "• No other apps are connected to the LED\n"
+                "• The LED device is powered on\n"
+                "• Try using 'Reconnect' button first",
+            )
+        except BlueLightsError as e:
             LOGGER.error(f"Fade colors error: {e}")
-            from PyQt6.QtWidgets import QMessageBox
-            error_msg = str(e)
-            if "WinError -2147023673" in error_msg or "avbrutt" in error_msg.lower():
-                detailed_msg = (
-                    "Failed to fade colors: Operation was cancelled.\n\n"
-                    "Make sure:\n"
-                    "• No other apps are connected to the LED\n"
-                    "• The LED device is powered on\n"
-                    "• Try using 'Reconnect' button first"
-                )
-            else:
-                detailed_msg = f"Failed to fade colors: {error_msg}"
-            QMessageBox.warning(self, "Fade Colors Error", detailed_msg)
+            QMessageBox.warning(self, "Fade Colors Error", f"Failed to fade colors: {e}")
 
     async def fade_colors(self) -> None:
         """Execute fade effect from current color to red."""
