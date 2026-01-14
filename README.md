@@ -103,7 +103,7 @@ await led.rainbow_cycle(duration_per_color=5.0)
 await led.strobe_light(color=(255, 255, 255), duration=5.0, flashes=10)
 
 # Start a continuous color cycle (runs in background)
-task = led.start_color_cycle(
+task = await led.start_color_cycle(
     colors=[(255, 0, 0), (0, 255, 0), (0, 0, 255)],
     duration_per_color=2.0
 )
@@ -152,6 +152,8 @@ from bluelights import (
     BJLEDInstance,
     LEDNotFoundError,
     LEDConnectionError,
+    LEDOperationCancelledError,
+    LEDTimeoutError,
     LEDCommandError,
     LEDUUIDError,
 )
@@ -161,6 +163,10 @@ try:
         await led.turn_on()
 except LEDNotFoundError:
     print("No LED device found")
+except LEDOperationCancelledError:
+    print("Operation cancelled (another app may be connected)")
+except LEDTimeoutError:
+    print("Operation timed out")
 except LEDConnectionError as e:
     print(f"Connection failed: {e}")
 except LEDCommandError as e:
