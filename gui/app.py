@@ -213,6 +213,7 @@ class LEDController(QWidget):
         self._loop = loop
         self._color_update_task: asyncio.Task[None] | None = None
         self._color_update_timer: QTimer | None = None
+        self._operation_in_progress: bool = False
         self.init_ui()
         self.init_tray_icon()
         self._setup_color_debounce()
@@ -261,10 +262,10 @@ class LEDController(QWidget):
         self.red_slider = QSlider(Qt.Orientation.Horizontal)
         self.red_slider.setObjectName("redSlider")
         self.red_slider.setMaximum(255)
-        self.red_slider.setValue(0)
+        self.red_slider.setValue(255)
         self.red_spinbox = QSpinBox()
         self.red_spinbox.setMaximum(255)
-        self.red_spinbox.setValue(0)
+        self.red_spinbox.setValue(255)
         self.red_slider.valueChanged.connect(self.red_spinbox.setValue)
         self.red_slider.valueChanged.connect(self.update_color)
         self.red_spinbox.valueChanged.connect(self.red_slider.setValue)
@@ -316,7 +317,7 @@ class LEDController(QWidget):
         preview_label = QLabel("Preview")
         self.color_preview = QFrame()
         self.color_preview.setObjectName("colorPreview")
-        self.color_preview.setStyleSheet("background-color: #000000;")
+        self.color_preview.setStyleSheet("background-color: #ff0000;")
         preview_row.addWidget(preview_label)
         preview_row.addWidget(self.color_preview, 1)
         color_layout.addLayout(preview_row)
@@ -372,6 +373,32 @@ class LEDController(QWidget):
         self._color_update_timer = QTimer()
         self._color_update_timer.setSingleShot(True)
         self._color_update_timer.timeout.connect(self._execute_color_update)
+
+    def _set_buttons_enabled(self, enabled: bool) -> None:
+        """Enable or disable all action buttons."""
+        self.reconnect_button.setEnabled(enabled)
+        self.on_button.setEnabled(enabled)
+        self.off_button.setEnabled(enabled)
+        self.rainbow_button.setEnabled(enabled)
+        self.fade_button.setEnabled(enabled)
+        self.strobe_button.setEnabled(enabled)
+
+    def _start_operation(self) -> bool:
+        """
+        Try to start an operation. Returns True if operation can proceed.
+
+        If another operation is in progress, returns False.
+        """
+        if self._operation_in_progress:
+            return False
+        self._operation_in_progress = True
+        self._set_buttons_enabled(False)
+        return True
+
+    def _end_operation(self) -> None:
+        """Mark the current operation as complete and re-enable buttons."""
+        self._operation_in_progress = False
+        self._set_buttons_enabled(True)
 
     def tray_icon_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         """
@@ -442,9 +469,9 @@ class LEDController(QWidget):
             )
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt method name
-        """Override closeEvent to minimize to tray instead of closing."""
-        self.hide()
-        event.ignore()
+        """Handle window close by exiting the application."""
+        self.exit_application()
+        event.accept()
 
     def exit_application(self) -> None:
         """Exit the application with a visual indicator."""
@@ -516,8 +543,6 @@ class LEDController(QWidget):
 
     async def turn_on_with_initial_color(self) -> None:
         """Turn on LEDs and set initial color based on slider values."""
-        await self.led_instance.turn_on()
-
         red = self.red_slider.value()
         green = self.green_slider.value()
         blue = self.blue_slider.value()
@@ -526,7 +551,9 @@ class LEDController(QWidget):
         if red == 0 and green == 0 and blue == 0:
             red, green, blue = 255, 0, 0
 
+        # Set color first, then turn on (some LEDs need color before turn on works)
         await self.led_instance.set_color_to_rgb(red, green, blue)
+        await self.led_instance.turn_on()
 
     def update_color(self) -> None:
         """Update LED color when sliders change (debounced)."""
@@ -568,11 +595,18 @@ class LEDController(QWidget):
     @asyncSlot()
     async def on_reconnect_clicked(self) -> None:
         """Handle reconnect button click."""
-        await self.reconnect()
+        if not self._start_operation():
+            return
+        try:
+            await self.reconnect()
+        finally:
+            self._end_operation()
 
     @asyncSlot()
     async def on_turn_on_clicked(self) -> None:
         """Handle turn on button click."""
+        if not self._start_operation():
+            return
         try:
             if not self.led_instance.is_connected:
                 await self.led_instance.connect()
@@ -591,10 +625,14 @@ class LEDController(QWidget):
         except BlueLightsError as e:
             LOGGER.error(f"Turn on error: {e}")
             QMessageBox.warning(self, "Turn On Error", f"Failed to turn on LED: {e}")
+        finally:
+            self._end_operation()
 
     @asyncSlot()
     async def on_turn_off_clicked(self) -> None:
         """Handle turn off button click."""
+        if not self._start_operation():
+            return
         try:
             if not self.led_instance.is_connected:
                 await self.led_instance.connect()
@@ -613,10 +651,14 @@ class LEDController(QWidget):
         except BlueLightsError as e:
             LOGGER.error(f"Turn off error: {e}")
             QMessageBox.warning(self, "Turn Off Error", f"Failed to turn off LED: {e}")
+        finally:
+            self._end_operation()
 
     @asyncSlot()
     async def on_rainbow_clicked(self) -> None:
         """Handle rainbow cycle button click."""
+        if not self._start_operation():
+            return
         try:
             if not self.led_instance.is_connected:
                 await self.led_instance.connect()
@@ -635,10 +677,14 @@ class LEDController(QWidget):
         except BlueLightsError as e:
             LOGGER.error(f"Rainbow cycle error: {e}")
             QMessageBox.warning(self, "Rainbow Cycle Error", f"Failed to start rainbow cycle: {e}")
+        finally:
+            self._end_operation()
 
     @asyncSlot()
     async def on_fade_clicked(self) -> None:
         """Handle fade colors button click."""
+        if not self._start_operation():
+            return
         try:
             if not self.led_instance.is_connected:
                 await self.led_instance.connect()
@@ -657,6 +703,8 @@ class LEDController(QWidget):
         except BlueLightsError as e:
             LOGGER.error(f"Fade colors error: {e}")
             QMessageBox.warning(self, "Fade Colors Error", f"Failed to fade colors: {e}")
+        finally:
+            self._end_operation()
 
     async def fade_colors(self) -> None:
         """Execute fade effect from current color to red."""
@@ -671,6 +719,8 @@ class LEDController(QWidget):
     @asyncSlot()
     async def on_strobe_clicked(self) -> None:
         """Handle strobe button click."""
+        if not self._start_operation():
+            return
         try:
             if not self.led_instance.is_connected:
                 await self.led_instance.connect()
@@ -701,6 +751,8 @@ class LEDController(QWidget):
         except BlueLightsError as e:
             LOGGER.error(f"Strobe error: {e}")
             QMessageBox.warning(self, "Strobe Error", f"Failed to start strobe: {e}")
+        finally:
+            self._end_operation()
 
 
 def main() -> None:
