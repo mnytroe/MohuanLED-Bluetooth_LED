@@ -86,7 +86,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 Or install directly from the repository:
 
 ```bash
-git clone https://github.com/Walkercito/MohuanLED-Bluetooth_LED
+git clone https://github.com/mnytroe/MohuanLED-Bluetooth_LED
 cd MohuanLED-Bluetooth_LED
 pip install .
 ```
@@ -174,7 +174,7 @@ If you want to contribute or modify the project:
 Clone the repository:
 
 ```bash
-git clone https://github.com/Walkercito/MohuanLED-Bluetooth_LED
+git clone https://github.com/mnytroe/MohuanLED-Bluetooth_LED
 ```
 
 Install dependencies (including dev tools):
